@@ -30,6 +30,7 @@ class CustomAuthHandler
         add_action('wp_ajax_nopriv_fluent_auth_rp', array($this, 'handlePasswordResentAjax'));
         add_action('fls_load_login_helper', array($this, 'loadAssets'));
         add_action('template_redirect', array($this, 'maybeRedirectLoggedIn'));
+        add_filter('do_shortcode_tag', array($this, 'maybeRedirectLoggedInViaJs'), 10, 3);
     }
 
     public function alterLoginRedirectUrl($redirect_to, $intentRedirectTo, $user)
@@ -607,6 +608,46 @@ class CustomAuthHandler
             wp_safe_redirect($redirect);
             exit;
         }
+    }
+
+    /**
+     * JS-based fallback for cases the `template_redirect` hook can't see — e.g.
+     * shortcodes rendered by page builders, widgets, or AJAX, where the
+     * shortcode isn't present in `$post->post_content`. Replaces the
+     * "already logged in" message output with an inline redirect script.
+     *
+     * @param string $output The rendered shortcode output.
+     * @param string $tag    The shortcode tag.
+     * @param array|string $attr The shortcode attributes ('' when none given).
+     * @return string
+     */
+    public function maybeRedirectLoggedInViaJs($output, $tag, $attr)
+    {
+        $authTags = [
+            'fluent_auth',
+            'fluent_auth_login',
+            'fluent_auth_signup',
+            'fluent_auth_reset_password',
+            'fluent_auth_magic_login',
+        ];
+
+        if (!in_array($tag, $authTags, true) || !is_user_logged_in()) {
+            return $output;
+        }
+
+        if (!is_array($attr)) {
+            return $output;
+        }
+
+        $redirect = $this->resolveAutoRedirectUrl($this->getShortcodes($attr));
+        if (!$redirect) {
+            return $output;
+        }
+
+        return sprintf(
+            '<script type="text/javascript">window.location.replace(%s);</script>',
+            wp_json_encode(esc_url_raw($redirect))
+        );
     }
 
     /**
