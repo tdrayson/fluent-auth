@@ -29,6 +29,7 @@ class CustomAuthHandler
         add_action('wp_ajax_nopriv_fluent_auth_signup', array($this, 'handleSignupAjax'));
         add_action('wp_ajax_nopriv_fluent_auth_rp', array($this, 'handlePasswordResentAjax'));
         add_action('fls_load_login_helper', array($this, 'loadAssets'));
+        add_action('template_redirect', array($this, 'maybeRedirectLoggedIn'));
     }
 
     public function alterLoginRedirectUrl($redirect_to, $intentRedirectTo, $user)
@@ -526,8 +527,10 @@ class CustomAuthHandler
             $redirectTo = home_url(Arr::get($_SERVER, 'REQUEST_URI'));
             $attributes['redirect_to'] = $redirectTo;
         } else if ($redirectTo) {
-            // Validate URL
-            if (!filter_var($redirectTo, FILTER_VALIDATE_URL)) {
+            // Allow site-relative paths like "/account"; FILTER_VALIDATE_URL would otherwise reject them for lacking a scheme. Leading "//" check guards against protocol-relative URLs.
+            if (strpos($redirectTo, '/') === 0 && strpos($redirectTo, '//') !== 0) {
+                $attributes['redirect_to'] = home_url($redirectTo);
+            } else if (!filter_var($redirectTo, FILTER_VALIDATE_URL)) {
                 $attributes['redirect_to'] = '';
             }
         }
@@ -555,6 +558,74 @@ class CustomAuthHandler
             }
             die();
         }
+    }
+
+    /**
+     * Server-side redirect for logged-in users landing on a page whose content
+     * contains an auth-form shortcode with `auto-redirect="true"`. Runs before
+     * any output so we can issue a proper 302 instead of relying on JS.
+     */
+    public function maybeRedirectLoggedIn()
+    {
+        if (is_admin() || !is_user_logged_in() || !is_singular() || wp_is_json_request()) {
+            return;
+        }
+
+        global $post;
+        if (!($post instanceof \WP_Post) || empty($post->post_content)) {
+            return;
+        }
+
+        $shortcodes = [
+            'fluent_auth',
+            'fluent_auth_login',
+            'fluent_auth_signup',
+            'fluent_auth_reset_password',
+            'fluent_auth_magic_login',
+        ];
+
+        foreach ($shortcodes as $tag) {
+            if (!has_shortcode($post->post_content, $tag)) {
+                continue;
+            }
+
+            $pattern = '/' . get_shortcode_regex([$tag]) . '/s';
+            if (!preg_match($pattern, $post->post_content, $matches)) {
+                continue;
+            }
+
+            $rawAttributes = shortcode_parse_atts($matches[3]);
+            if (!is_array($rawAttributes)) {
+                continue;
+            }
+
+            $redirect = $this->resolveAutoRedirectUrl($this->getShortcodes($rawAttributes));
+            if (!$redirect) {
+                continue;
+            }
+
+            wp_safe_redirect($redirect);
+            exit;
+        }
+    }
+
+    /**
+     * @param array $parsed Shortcode attributes already passed through getShortcodes().
+     * @return string Empty when redirect is disabled, missing, or invalid.
+     */
+    protected function resolveAutoRedirectUrl($parsed)
+    {
+        $autoRedirect = Arr::get($parsed, 'auto-redirect');
+        if ($autoRedirect !== 'true' && $autoRedirect !== true) {
+            return '';
+        }
+
+        $redirectTo = Arr::get($parsed, 'redirect_to');
+        if (!$redirectTo) {
+            return '';
+        }
+
+        return Helper::getValidatedRedirectUrl($redirectTo, '');
     }
 
     public function loadAssets($hide = '')
